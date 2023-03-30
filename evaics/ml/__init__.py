@@ -1,4 +1,4 @@
-__version__ = '0.0.2'
+__version__ = '0.0.3'
 
 import sys
 import requests
@@ -384,8 +384,8 @@ class HistoryDF:
         return df
 
 
-def _history_df(self):
-    return HistoryDF(self)
+def _history_df(self, params_csv=None):
+    return HistoryDF(self, params_csv=params_csv)
 
 
 HttpClient.history_df = _history_df
