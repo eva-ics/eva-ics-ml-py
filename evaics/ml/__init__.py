@@ -134,6 +134,8 @@ class HistoryDF:
         Args:
             t_start: a float (timestamp), a string or a datetime object
         """
+        if isinstance(t_end, datetime):
+            t_end = t_end.timestamp()
         self.params['t_end'] = t_end
         return self
 
