@@ -29,12 +29,15 @@ class HistoryDF:
     automatically added to evaics.client.HttpClient
     """
 
-    def __init__(self, client, csv: str = None):
+    def __init__(self, client, params_csv: str = None):
         """
         Create HistoryDF object instance
 
         Args:
             client: HTTP client object
+
+        Optional:
+            params_csv: CSV file or stream to read parameters from
 
         All configuration methods of the class can be used in chains, e.g.
         HistoryDF(client).oid(
@@ -45,6 +48,8 @@ class HistoryDF:
         self.mlkit = None
         self.params = {'fill': '1S'}
         self.oid_map = {}
+        if params_csv is not None:
+            self.read_params_csv(params_csv)
 
     def with_mlkit(self, mlkit: Union[bool, str]):
         """
