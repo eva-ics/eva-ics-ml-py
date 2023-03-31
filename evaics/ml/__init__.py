@@ -264,17 +264,17 @@ class HistoryDF:
             params = {'database': database, 'oid_map': self.oid_map}
             files = {}
             if hasattr(data, 'seek'):
-                files['file'] = data
+                files['file'] = ('', data, 'text/csv')
             elif isinstance(data, str):
-                files['file'] = open(data, 'r')
+                files['file'] = ('', open(data, 'r'), 'text/csv')
             elif isinstance(data, pd.DataFrame):
                 buf = StringIO()
                 data.to_csv(buf)
                 buf.seek(0)
-                files['file'] = buf
+                files['file'] = ('', buf, 'text/csv')
             else:
                 raise ValueError('unsupported data kind')
-            req = self._post(f'{ml_url}/ml/api/push.item.state_history_csv',
+            req = self._post(f'{ml_url}/ml/api/upload.item.state_history',
                              data={'params': json.dumps(params)},
                              files=files)
             if req.ok:
