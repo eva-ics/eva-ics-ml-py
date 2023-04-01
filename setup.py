@@ -20,7 +20,7 @@ setuptools.setup(
         'requests>=2.26.0', 'pandas>=1.5.1', 'evaics>=0.2.5', 'tqdm>=4.45.0'
     ],
     classifiers=('Programming Language :: Python :: 3',
-                 'License :: OSI Approved :: MIT License',
+                 'License :: OSI Approved :: Apache Software License',
                  'Topic :: Software Development :: Libraries',
                  'Topic :: Scientific/Engineering :: Artificial Intelligence'),
 )
