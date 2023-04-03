@@ -21,8 +21,6 @@ from collections import OrderedDict
 
 from busrt.rpc import Rpc as BusRpcClient
 
-BUS_BULK_SIZE = 10_000
-
 
 class HistoryDF:
     """
@@ -287,11 +285,94 @@ class HistoryDF:
             params['time_format'] = 'raw'
         return params
 
+    def _fetch_bus(self, time_col, strict_col_order):
+        params = self._prepare_mlkit_params(time_col)
+        res = self.client.call(
+            self._get_mlkit(),
+            busrt.rpc.Request('Citem.state_history',
+                              pack(params))).wait_completed()
+        cpl = res.get_payload()
+        names = []
+        data = []
+        while True:
+            res = self.client.call(self._get_mlkit(),
+                                   busrt.rpc.Request('N',
+                                                     cpl)).wait_completed()
+            payload = res.get_payload()
+            if payload:
+                buf = BytesIO(payload)
+                while True:
+                    try:
+                        f = pa.ipc.open_stream(buf)
+                        names += f.schema.names
+                        for b in f:
+                            data += b.columns
+                    except pa.lib.ArrowInvalid:
+                        break
+                if strict_col_order:
+                    _reoder(self.oid_map, names, data, time_col=time_col)
+                return pa.Table.from_arrays(data, names)
+            else:
+                break
+
+    def _fetch_mlsrv_http(self, ml_url, time_col, strict_col_order):
+        params = self._prepare_mlkit_params(time_col)
+        req = self._post(f'{ml_url}/ml/api/query.item.state_history',
+                         headers={
+                             'accept': 'application/vnd.apache.arrow.stream',
+                             'accept-encoding': 'gzip'
+                         },
+                         json=params,
+                         stream=True)
+        if req.ok:
+            if req.headers.get('content-encoding') == 'gzip':
+                stream = gzip.GzipFile(fileobj=req.raw, mode='rb')
+            else:
+                stream = req.raw
+            names = []
+            data = []
+            while True:
+                try:
+                    f = pa.ipc.open_stream(stream)
+                    names += f.schema.names
+                    for b in f:
+                        data += b.columns
+                except pa.lib.ArrowInvalid:
+                    break
+            if strict_col_order:
+                _reoder(self.oid_map, names, data, time_col=time_col)
+            return pa.Table.from_arrays(data, names)
+        else:
+            raise FunctionFailed(f'{req.status_code} {req.text}')
+
+    def _fetch_hmi_http(self, time_col):
+        params = self.params.copy()
+        params['i'] = [m.pop('oid') for m in self.oid_map]
+        stats = self.client.call('item.state_history', params)
+        data = OrderedDict()
+        cols = {}
+        if time_col == 'keep':
+            data['time'] = stats.pop('t')
+        for (oid, proc) in zip(params['i'], self.oid_map):
+            if proc['status'] == True:
+                col = f'{oid}/status'
+                data[col] = stats.pop(col)
+            elif isinstance(proc['status'], str):
+                col = proc['status']
+                data[col] = stats.pop(f'{oid}/status')
+            if proc['value'] == True:
+                col = f'{oid}/value'
+                data[col] = stats.pop(col)
+            elif isinstance(proc['value'], str):
+                col = proc['value']
+                data[col] = stats.pop(f'{oid}/value')
+        return pa.Table.from_pydict(data)
+
     def fetch(self,
               time_col: str = 'keep',
               tz: str = 'local',
               output='arrow',
-              strict_col_order=True):
+              strict_col_order=False):
         """
         Fetch data
 
@@ -301,7 +382,7 @@ class HistoryDF:
                 drop the time column
             tz: time zone (local, custom or None to keep time column as UNIX
                 timestamp), the default is "local"
-            strict_col_order: force strict column ordering (default: True)
+            strict_col_order: force strict column ordering
 
 
         Returns:
@@ -311,101 +392,25 @@ class HistoryDF:
             raise RuntimeError('unsupported time_col op')
         if output not in ['arrow', 'pandas', 'polars']:
             raise RuntimeError('unsupported output type')
-        params = self.params.copy()
         if isinstance(self.client, BusRpcClient):
-            from_mlkit = True
-            params = self._prepare_mlkit_params(time_col)
-            res = self.client.call(
-                self._get_mlkit(),
-                busrt.rpc.Request('Citem.state_history',
-                                  pack(params))).wait_completed()
-            cursor_id = unpack(res.get_payload(), raw=False)['u']
-            cpl = pack(dict(u=cursor_id, c=BUS_BULK_SIZE))
-            df = pd.DataFrame()
-            while True:
-                res = self.client.call(self._get_mlkit(),
-                                       busrt.rpc.Request('NB',
-                                                         cpl)).wait_completed()
-                payload = res.get_payload()
-                if payload:
-                    if len(df.columns):
-                        a = pd.read_csv(BytesIO(payload),
-                                        header=None,
-                                        names=df.columns)
-                        df = pd.concat([df, a])
-                        if len(a) < BUS_BULK_SIZE:
-                            break
-                    else:
-                        df = pd.read_csv(BytesIO(payload))
-                        if len(
-                                df
-                        ) < BUS_BULK_SIZE - 1:  # df rows (strings) + header (1 string)
-                            break
-                else:
-                    break
+            from_ipc = True
+            df = self._fetch_bus(time_col, strict_col_order)
         else:
             ml_url = self._get_ml_url()
             if ml_url:
-                from_mlkit = True
-                params = self._prepare_mlkit_params(time_col)
-                req = self._post(
-                    f'{ml_url}/ml/api/query.item.state_history',
-                    headers={
-                        'accept': 'application/vnd.apache.arrow.stream',
-                        'accept-encoding': 'gzip'
-                    },
-                    json=params,
-                    stream=True)
-                if req.ok:
-                    if req.headers.get('content-encoding') == 'gzip':
-                        stream = gzip.GzipFile(fileobj=req.raw, mode='rb')
-                    else:
-                        stream = req.raw
-                    names = []
-                    data = []
-                    while True:
-                        try:
-                            f = pa.ipc.open_stream(stream)
-                            names += f.schema.names
-                            for b in f:
-                                data += b.columns
-                        except pa.lib.ArrowInvalid:
-                            break
-                    if strict_col_order:
-                        _reoder(self.oid_map, names, data, time_col=time_col)
-                    df = pa.Table.from_arrays(data, names)
-                else:
-                    raise FunctionFailed(f'{req.status_code} {req.text}')
+                from_ipc = True
+                df = self._fetch_mlsrv_http(ml_url, time_col, strict_col_order)
             else:
-                from_mlkit = False
-                params['i'] = [m.pop('oid') for m in self.oid_map]
-                stats = self.client.call('item.state_history', params)
-                data = OrderedDict()
-                cols = {}
-                if time_col == 'keep':
-                    data['time'] = stats.pop('t')
-                for (oid, proc) in zip(params['i'], self.oid_map):
-                    if proc['status'] == True:
-                        col = f'{oid}/status'
-                        data[col] = stats.pop(col)
-                    elif isinstance(proc['status'], str):
-                        col = proc['status']
-                        data[col] = stats.pop(f'{oid}/status')
-                    if proc['value'] == True:
-                        col = f'{oid}/value'
-                        data[col] = stats.pop(col)
-                    elif isinstance(proc['value'], str):
-                        col = proc['value']
-                        data[col] = stats.pop(f'{oid}/value')
-                df = pa.Table.from_pydict(data)
+                from_ipc = False
+                df = self._fetch_hmi_http(time_col)
         return _finalize_data(df,
                               time_col=time_col,
                               output=output,
                               tz=tz,
-                              from_mlkit=from_mlkit)
+                              from_ipc=from_ipc)
 
 
-def _finalize_data(df, time_col=None, output=None, tz=None, from_mlkit=False):
+def _finalize_data(df, time_col=None, output=None, tz=None, from_ipc=False):
     if output == 'arrow':
         return df
     if tz == 'local':
@@ -414,7 +419,7 @@ def _finalize_data(df, time_col=None, output=None, tz=None, from_mlkit=False):
         import pandas as pd
         df = df.to_pandas()
         if time_col != 'drop' and tz is not None:
-            if not from_mlkit:
+            if not from_ipc:
                 df['time'] = pd.to_datetime(df['time'], unit='s')
             df['time'] = df['time'].dt.tz_localize('UTC').dt.tz_convert(tz)
         return df
@@ -422,7 +427,7 @@ def _finalize_data(df, time_col=None, output=None, tz=None, from_mlkit=False):
         import polars as pl
         df = pl.from_arrow(df)
         if time_col != 'drop' and tz is not None:
-            if not from_mlkit:
+            if not from_ipc:
                 df = df.with_column(pl.from_epoch('time', unit='s'))
             df = df.with_columns(df['time'].dt.replace_time_zone('UTC'))
             df = df.with_columns(df['time'].dt.convert_time_zone(tz))
@@ -431,7 +436,7 @@ def _finalize_data(df, time_col=None, output=None, tz=None, from_mlkit=False):
         raise RuntimeError('output unsupported')
 
 
-def _reoder(oid_map, names, data, time_col='keep'):
+def _reoder(oid_map, names, data, time_col=None):
     col_names = []
     if time_col == 'keep':
         col_names.append('time')
