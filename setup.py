@@ -1,4 +1,4 @@
-__version__ = '0.0.5'
+__version__ = '0.1.0'
 
 import setuptools
 
@@ -17,7 +17,7 @@ setuptools.setup(
     packages=setuptools.find_packages(),
     license='Apache License 2.0',
     install_requires=[
-        'requests>=2.26.0', 'pandas>=1.5.1', 'evaics>=0.2.5', 'tqdm>=4.45.0'
+        'requests>=2.26.0', 'pyarrow>=11.0.0', 'evaics>=0.2.5', 'tqdm>=4.45.0'
     ],
     classifiers=('Programming Language :: Python :: 3',
                  'License :: OSI Approved :: Apache Software License',

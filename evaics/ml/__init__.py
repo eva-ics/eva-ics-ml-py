@@ -1,4 +1,4 @@
-__version__ = '0.0.5'
+__version__ = '0.1.0'
 
 import sys
 import requests
@@ -7,7 +7,9 @@ import logging
 import time
 import json
 import busrt
-import pandas as pd
+import pyarrow as pa
+import pyarrow.csv as csv
+import pyarrow.compute as pc
 
 from datetime import datetime
 from typing import Union
@@ -15,6 +17,7 @@ from io import StringIO, BytesIO
 
 from evaics.client import HttpClient
 from evaics.sdk import OID, FunctionFailed, pack, unpack
+from collections import OrderedDict
 
 from busrt.rpc import Rpc as BusRpcClient
 
@@ -71,8 +74,8 @@ class HistoryDF:
         Args:
             f: file path or buffer
         """
-        params = pd.read_csv(f)
-        for _, row in params.iterrows():
+        params = csv.read_csv(f).to_pylist()
+        for row in params:
             self.oid(row['oid'],
                      status=row.get('status'),
                      value=row.get('value'),
@@ -190,12 +193,6 @@ class HistoryDF:
             v['database'] = database
         return self
 
-    def _prepare_df_time(self, df, tz=None):
-        if tz is None:
-            tz = time.tzname[0]
-        df['time'] = pd.to_datetime(df['time'], unit='s')
-        df['time'] = df['time'].dt.tz_localize('UTC').dt.tz_convert(tz)
-
     def _get_mlkit(self):
         if self.mlkit is None:
             try:
@@ -263,13 +260,11 @@ class HistoryDF:
                 raise RuntimeError('mlkit server not specified')
             params = {'database': database, 'oid_map': self.oid_map}
             files = {}
-            if hasattr(data, 'seek'):
-                files['file'] = ('', data, 'text/csv')
-            elif isinstance(data, str):
+            if isinstance(data, str):
                 files['file'] = ('', open(data, 'r'), 'text/csv')
-            elif isinstance(data, pd.DataFrame):
+            elif isinstance(data, pa.Table):
                 buf = StringIO()
-                data.to_csv(buf)
+                csv.write_csv(data, buf)
                 buf.seek(0)
                 files['file'] = ('', buf, 'text/csv')
             else:
@@ -291,19 +286,25 @@ class HistoryDF:
             params['time_format'] = 'raw'
         return params
 
-    def fetch(self, t_col: str = 'keep', tz: str = None):
+    def fetch(self, t_col: str = 'keep', tz: str = 'local', output='arrow'):
         """
         Fetch data
 
         Optional:
+            output: output format (arrow, pandas or polars)
             t_col: time column processing, "keep" - keep the column, "drop" -
-                   drop the time column, "index" - keep and make the data frame
-                   index
-            tz: time zone
+                drop the time column
+            tz: time zone (local, custom or None to keep time column as UNIX
+                timestamp), the default is "local"
+
 
         Returns:
             a prepared Pandas DataFrame object
         """
+        if t_col not in ['keep', 'drop']:
+            raise RuntimeError('unsupported t_col op')
+        if output not in ['arrow', 'pandas', 'polars']:
+            raise RuntimeError('unsupported output type')
         params = self.params.copy()
         if isinstance(self.client, BusRpcClient):
             params = self._prepare_mlkit_params(t_col)
@@ -335,8 +336,6 @@ class HistoryDF:
                             break
                 else:
                     break
-            if t_col != 'drop':
-                self._prepare_df_time(df, tz)
         else:
             ml_url = self._get_ml_url()
             if ml_url:
@@ -349,41 +348,55 @@ class HistoryDF:
                         stream = gzip.GzipFile(fileobj=req.raw, mode="rb")
                     else:
                         stream = req.raw
-                    df = pd.read_csv(stream)
-                    if t_col != 'drop':
-                        self._prepare_df_time(df, tz)
+                    df = csv.read_csv(stream)
                 else:
                     raise FunctionFailed(f'{req.status_code} {req.text}')
             else:
                 params['i'] = list(self.oid_map)
                 stats = self.client.call('item.state_history', params)
-                for oid, proc in self.oid_map.items():
-                    if not proc['status']:
-                        del stats[f'{oid}/status']
-                    if not proc['value']:
-                        del stats[f'{oid}/value']
+                data = OrderedDict()
                 cols = {}
-                if t_col in ['keep', 'index']:
-                    times = stats.pop('t')
-                else:
-                    del stats['t']
-                    times = None
-                df = pd.DataFrame(data=stats)
-                if times is not None:
-                    df.insert(0, 'time', times)
+                if t_col == 'keep':
+                    data['time'] = stats.pop('t')
                 for oid, proc in self.oid_map.items():
-                    if not isinstance(proc['status'], bool):
-                        cols[f'{oid}/status'] = proc['status']
-                    if not isinstance(proc['value'], bool):
-                        cols[f'{oid}/value'] = proc['value']
-                if cols:
-                    df = df.rename(columns=cols)
-                if t_col != 'drop':
-                    self._prepare_df_time(df, tz)
-                return df
-            if t_col == 'index':
-                df = df.set_index('time')
+                    if proc['status'] == True:
+                        col = f'{oid}/status'
+                        data[col] = stats.pop(col)
+                    elif isinstance(proc['status'], str):
+                        col = proc['status']
+                        data[col] = stats.pop(f'{oid}/status')
+                    if proc['value'] == True:
+                        col = f'{oid}/value'
+                        data[col] = stats.pop(col)
+                    elif isinstance(proc['value'], str):
+                        col = proc['value']
+                        data[col] = stats.pop(f'{oid}/value')
+                df = pa.Table.from_pydict(data)
+        return _finalize_data(df, t_col=t_col, output=output, tz=tz)
+
+
+def _finalize_data(df, t_col=None, output=None, tz=None):
+    if output == 'arrow':
         return df
+    if tz == 'local':
+        tz = time.tzname[0]
+    if output == 'pandas':
+        import pandas as pd
+        df = df.to_pandas()
+        if t_col != 'drop' and tz is not None:
+            df['time'] = pd.to_datetime(df['time'], unit='s')
+            df['time'] = df['time'].dt.tz_localize('UTC').dt.tz_convert(tz)
+        return df
+    elif output == 'polars':
+        import polars as pl
+        df = pl.from_arrow(df)
+        if t_col != 'drop' and tz is not None:
+            df = df.with_column(pl.from_epoch('time', unit='s'))
+            df = df.with_columns(df['time'].dt.replace_time_zone('UTC'))
+            df = df.with_columns(df['time'].dt.convert_time_zone(tz))
+        return df
+    else:
+        raise RuntimeError('output unsupported')
 
 
 def _history_df(self, params_csv=None):
