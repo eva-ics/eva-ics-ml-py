@@ -276,17 +276,17 @@ class HistoryDF:
             else:
                 raise FunctionFailed(f'{req.status_code} {req.text}')
 
-    def _prepare_mlkit_params(self, time_col):
+    def _prepare_mlkit_params(self, t_col):
         params = self.params.copy()
         params['oid_map'] = self.oid_map
-        if time_col == 'drop':
+        if t_col == 'drop':
             params['time_format'] = 'no'
         else:
             params['time_format'] = 'raw'
         return params
 
-    def _fetch_bus(self, time_col, strict_col_order):
-        params = self._prepare_mlkit_params(time_col)
+    def _fetch_bus(self, t_col, strict_col_order):
+        params = self._prepare_mlkit_params(t_col)
         res = self.client.call(
             self._get_mlkit(),
             busrt.rpc.Request('Citem.state_history',
@@ -310,13 +310,13 @@ class HistoryDF:
                     except pa.lib.ArrowInvalid:
                         break
                 if strict_col_order:
-                    _reoder(self.oid_map, names, data, time_col=time_col)
+                    _reoder(self.oid_map, names, data, t_col=t_col)
                 return pa.Table.from_arrays(data, names)
             else:
                 break
 
-    def _fetch_mlsrv_http(self, ml_url, time_col, strict_col_order):
-        params = self._prepare_mlkit_params(time_col)
+    def _fetch_mlsrv_http(self, ml_url, t_col, strict_col_order):
+        params = self._prepare_mlkit_params(t_col)
         req = self._post(f'{ml_url}/ml/api/query.item.state_history',
                          headers={
                              'accept': 'application/vnd.apache.arrow.stream',
@@ -340,18 +340,18 @@ class HistoryDF:
                 except pa.lib.ArrowInvalid:
                     break
             if strict_col_order:
-                _reoder(self.oid_map, names, data, time_col=time_col)
+                _reoder(self.oid_map, names, data, t_col=t_col)
             return pa.Table.from_arrays(data, names)
         else:
             raise FunctionFailed(f'{req.status_code} {req.text}')
 
-    def _fetch_hmi_http(self, time_col):
+    def _fetch_hmi_http(self, t_col):
         params = self.params.copy()
         params['i'] = [m.pop('oid') for m in self.oid_map]
         stats = self.client.call('item.state_history', params)
         data = OrderedDict()
         cols = {}
-        if time_col == 'keep':
+        if t_col == 'keep':
             data['time'] = stats.pop('t')
         for (oid, proc) in zip(params['i'], self.oid_map):
             if proc['status'] == True:
@@ -369,7 +369,7 @@ class HistoryDF:
         return pa.Table.from_pydict(data)
 
     def fetch(self,
-              time_col: str = 'keep',
+              t_col: str = 'keep',
               tz: str = 'local',
               output='arrow',
               strict_col_order=False):
@@ -378,7 +378,7 @@ class HistoryDF:
 
         Optional:
             output: output format (arrow, pandas or polars)
-            time_col: time column processing, "keep" - keep the column, "drop" -
+            t_col: time column processing, "keep" - keep the column, "drop" -
                 drop the time column
             tz: time zone (local, custom or None to keep time column as UNIX
                 timestamp), the default is "local"
@@ -388,29 +388,29 @@ class HistoryDF:
         Returns:
             a prepared Pandas DataFrame object
         """
-        if time_col not in ['keep', 'drop']:
-            raise RuntimeError('unsupported time_col op')
+        if t_col not in ['keep', 'drop']:
+            raise RuntimeError('unsupported t_col op')
         if output not in ['arrow', 'pandas', 'polars']:
             raise RuntimeError('unsupported output type')
         if isinstance(self.client, BusRpcClient):
             from_ipc = True
-            df = self._fetch_bus(time_col, strict_col_order)
+            df = self._fetch_bus(t_col, strict_col_order)
         else:
             ml_url = self._get_ml_url()
             if ml_url:
                 from_ipc = True
-                df = self._fetch_mlsrv_http(ml_url, time_col, strict_col_order)
+                df = self._fetch_mlsrv_http(ml_url, t_col, strict_col_order)
             else:
                 from_ipc = False
-                df = self._fetch_hmi_http(time_col)
+                df = self._fetch_hmi_http(t_col)
         return _finalize_data(df,
-                              time_col=time_col,
+                              t_col=t_col,
                               output=output,
                               tz=tz,
                               from_ipc=from_ipc)
 
 
-def _finalize_data(df, time_col=None, output=None, tz=None, from_ipc=False):
+def _finalize_data(df, t_col=None, output=None, tz=None, from_ipc=False):
     if output == 'arrow':
         return df
     if tz == 'local':
@@ -418,7 +418,7 @@ def _finalize_data(df, time_col=None, output=None, tz=None, from_ipc=False):
     if output == 'pandas':
         import pandas as pd
         df = df.to_pandas()
-        if time_col != 'drop' and tz is not None:
+        if t_col != 'drop' and tz is not None:
             if not from_ipc:
                 df['time'] = pd.to_datetime(df['time'], unit='s')
             df['time'] = df['time'].dt.tz_localize('UTC').dt.tz_convert(tz)
@@ -426,7 +426,7 @@ def _finalize_data(df, time_col=None, output=None, tz=None, from_ipc=False):
     elif output == 'polars':
         import polars as pl
         df = pl.from_arrow(df)
-        if time_col != 'drop' and tz is not None:
+        if t_col != 'drop' and tz is not None:
             if not from_ipc:
                 df = df.with_column(pl.from_epoch('time', unit='s'))
             df = df.with_columns(df['time'].dt.replace_time_zone('UTC'))
@@ -436,9 +436,9 @@ def _finalize_data(df, time_col=None, output=None, tz=None, from_ipc=False):
         raise RuntimeError('output unsupported')
 
 
-def _reoder(oid_map, names, data, time_col=None):
+def _reoder(oid_map, names, data, t_col=None):
     col_names = []
-    if time_col == 'keep':
+    if t_col == 'keep':
         col_names.append('time')
     for m in oid_map:
         if m['status'] in ['true', '1', True]:
