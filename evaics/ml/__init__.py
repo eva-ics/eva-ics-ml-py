@@ -50,7 +50,7 @@ class HistoryDF:
         self.client = client
         self.mlkit = None
         self.params = {'fill': '1S'}
-        self.oid_map = {}
+        self.oid_map = []
         if params_csv is not None:
             self.read_params_csv(params_csv)
 
@@ -115,7 +115,8 @@ class HistoryDF:
             m['database'] = database
         if xopts is not None:
             m['xopts'] = xopts
-        self.oid_map[oid] = m
+        m['oid'] = str(oid)
+        self.oid_map.append(m)
         return self
 
     def t_start(self, t_start: Union[float, str, datetime]):
@@ -176,7 +177,7 @@ class HistoryDF:
         """
         if not self._is_mlkit_enabled():
             self.params['xopts'] = xopts
-        for _, v in self.oid_map.items():
+        for v in self.oid_map:
             v['xopts'] = xopts
         return self
 
@@ -189,7 +190,7 @@ class HistoryDF:
         """
         if not self._is_mlkit_enabled():
             self.params['database'] = database
-        for _, v in self.oid_map.items():
+        for v in self.oid_map:
             v['database'] = database
         return self
 
@@ -277,38 +278,43 @@ class HistoryDF:
             else:
                 raise FunctionFailed(f'{req.status_code} {req.text}')
 
-    def _prepare_mlkit_params(self, t_col):
+    def _prepare_mlkit_params(self, time_col):
         params = self.params.copy()
         params['oid_map'] = self.oid_map
-        if t_col == 'drop':
+        if time_col == 'drop':
             params['time_format'] = 'no'
         else:
             params['time_format'] = 'raw'
         return params
 
-    def fetch(self, t_col: str = 'keep', tz: str = 'local', output='arrow'):
+    def fetch(self,
+              time_col: str = 'keep',
+              tz: str = 'local',
+              output='arrow',
+              strict_col_order=True):
         """
         Fetch data
 
         Optional:
             output: output format (arrow, pandas or polars)
-            t_col: time column processing, "keep" - keep the column, "drop" -
+            time_col: time column processing, "keep" - keep the column, "drop" -
                 drop the time column
             tz: time zone (local, custom or None to keep time column as UNIX
                 timestamp), the default is "local"
+            strict_col_order: force strict column ordering (default: True)
 
 
         Returns:
             a prepared Pandas DataFrame object
         """
-        if t_col not in ['keep', 'drop']:
-            raise RuntimeError('unsupported t_col op')
+        if time_col not in ['keep', 'drop']:
+            raise RuntimeError('unsupported time_col op')
         if output not in ['arrow', 'pandas', 'polars']:
             raise RuntimeError('unsupported output type')
         params = self.params.copy()
         if isinstance(self.client, BusRpcClient):
             from_mlkit = True
-            params = self._prepare_mlkit_params(t_col)
+            params = self._prepare_mlkit_params(time_col)
             res = self.client.call(
                 self._get_mlkit(),
                 busrt.rpc.Request('Citem.state_history',
@@ -341,7 +347,7 @@ class HistoryDF:
             ml_url = self._get_ml_url()
             if ml_url:
                 from_mlkit = True
-                params = self._prepare_mlkit_params(t_col)
+                params = self._prepare_mlkit_params(time_col)
                 req = self._post(
                     f'{ml_url}/ml/api/query.item.state_history',
                     headers={
@@ -355,8 +361,8 @@ class HistoryDF:
                         stream = gzip.GzipFile(fileobj=req.raw, mode='rb')
                     else:
                         stream = req.raw
-                    data = []
                     names = []
+                    data = []
                     while True:
                         try:
                             f = pa.ipc.open_stream(stream)
@@ -365,18 +371,20 @@ class HistoryDF:
                                 data += b.columns
                         except pa.lib.ArrowInvalid:
                             break
+                    if strict_col_order:
+                        _reoder(self.oid_map, names, data, time_col=time_col)
                     df = pa.Table.from_arrays(data, names)
                 else:
                     raise FunctionFailed(f'{req.status_code} {req.text}')
             else:
                 from_mlkit = False
-                params['i'] = list(self.oid_map)
+                params['i'] = [m.pop('oid') for m in self.oid_map]
                 stats = self.client.call('item.state_history', params)
                 data = OrderedDict()
                 cols = {}
-                if t_col == 'keep':
+                if time_col == 'keep':
                     data['time'] = stats.pop('t')
-                for oid, proc in self.oid_map.items():
+                for (oid, proc) in zip(params['i'], self.oid_map):
                     if proc['status'] == True:
                         col = f'{oid}/status'
                         data[col] = stats.pop(col)
@@ -391,13 +399,13 @@ class HistoryDF:
                         data[col] = stats.pop(f'{oid}/value')
                 df = pa.Table.from_pydict(data)
         return _finalize_data(df,
-                              t_col=t_col,
+                              time_col=time_col,
                               output=output,
                               tz=tz,
                               from_mlkit=from_mlkit)
 
 
-def _finalize_data(df, t_col=None, output=None, tz=None, from_mlkit=False):
+def _finalize_data(df, time_col=None, output=None, tz=None, from_mlkit=False):
     if output == 'arrow':
         return df
     if tz == 'local':
@@ -405,7 +413,7 @@ def _finalize_data(df, t_col=None, output=None, tz=None, from_mlkit=False):
     if output == 'pandas':
         import pandas as pd
         df = df.to_pandas()
-        if t_col != 'drop' and tz is not None:
+        if time_col != 'drop' and tz is not None:
             if not from_mlkit:
                 df['time'] = pd.to_datetime(df['time'], unit='s')
             df['time'] = df['time'].dt.tz_localize('UTC').dt.tz_convert(tz)
@@ -413,7 +421,7 @@ def _finalize_data(df, t_col=None, output=None, tz=None, from_mlkit=False):
     elif output == 'polars':
         import polars as pl
         df = pl.from_arrow(df)
-        if t_col != 'drop' and tz is not None:
+        if time_col != 'drop' and tz is not None:
             if not from_mlkit:
                 df = df.with_column(pl.from_epoch('time', unit='s'))
             df = df.with_columns(df['time'].dt.replace_time_zone('UTC'))
@@ -421,6 +429,40 @@ def _finalize_data(df, t_col=None, output=None, tz=None, from_mlkit=False):
         return df
     else:
         raise RuntimeError('output unsupported')
+
+
+def _reoder(oid_map, names, data, time_col='keep'):
+    col_names = []
+    if time_col == 'keep':
+        col_names.append('time')
+    for m in oid_map:
+        if m['status'] in ['true', '1', True]:
+            col_names.append(_default_col_name(m['oid'], 'status'))
+        elif m['status'] not in [None, False, 'false', '0', 'null']:
+            col_names.append(str(m['status']))
+        if m['value'] in ['true', '1', True]:
+            col_names.append(_default_col_name(m['oid'], 'value'))
+        elif m['value'] not in [None, False, 'false', '0', 'null']:
+            col_names.append(str(m['value']))
+    for i, col in enumerate(col_names):
+        try:
+            pos = names.index(col)
+            if pos != i:
+                _swap_entry(names, i, pos)
+                _swap_entry(data, i, pos)
+        except ValueError:
+            pass
+
+
+def _swap_entry(arr, pos1, pos2):
+    entry1 = arr.pop(pos1)
+    entry2 = arr.pop(pos2 - 1)
+    arr.insert(pos2 - 1, entry1)
+    arr.insert(pos1, entry2)
+
+
+def _default_col_name(oid, prop):
+    return f'{oid}/{prop}'
 
 
 def _history_df(self, params_csv=None):
