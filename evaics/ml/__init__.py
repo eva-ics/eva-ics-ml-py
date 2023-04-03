@@ -216,20 +216,20 @@ class HistoryDF:
                 ml_url = ml_url[:-1]
         return ml_url
 
-    def _post(self, *args, accept_gzip=False, **kwargs):
+    def _post(self, *args, accept_gzip=False, headers=None, **kwargs):
         if not self.client.token:
             self.client.authenticate()
             refreshed = True
         else:
             refreshed = False
         while True:
-            headers = {
+            req_headers = {
                 'x-auth-key': self.client.token,
             }
-            if accept_gzip:
-                headers['accept-encoding'] = 'gzip'
+            if headers is not None:
+                req_headers.update(headers)
             req = requests.post(*args,
-                                headers=headers,
+                                headers=req_headers,
                                 timeout=self.client.timeout,
                                 **kwargs)
             if req.status_code == 403 and req.text.endswith('(AUTH)'):
@@ -307,6 +307,7 @@ class HistoryDF:
             raise RuntimeError('unsupported output type')
         params = self.params.copy()
         if isinstance(self.client, BusRpcClient):
+            from_mlkit = True
             params = self._prepare_mlkit_params(t_col)
             res = self.client.call(
                 self._get_mlkit(),
@@ -339,19 +340,36 @@ class HistoryDF:
         else:
             ml_url = self._get_ml_url()
             if ml_url:
+                from_mlkit = True
                 params = self._prepare_mlkit_params(t_col)
-                req = self._post(f'{ml_url}/ml/api/query.item.state_history',
-                                 json=params,
-                                 stream=True)
+                req = self._post(
+                    f'{ml_url}/ml/api/query.item.state_history',
+                    headers={
+                        'accept': 'application/vnd.apache.arrow.stream',
+                        'accept-encoding': 'gzip'
+                    },
+                    json=params,
+                    stream=True)
                 if req.ok:
                     if req.headers.get('content-encoding') == 'gzip':
-                        stream = gzip.GzipFile(fileobj=req.raw, mode="rb")
+                        stream = gzip.GzipFile(fileobj=req.raw, mode='rb')
                     else:
                         stream = req.raw
-                    df = csv.read_csv(stream)
+                    data = []
+                    names = []
+                    while True:
+                        try:
+                            f = pa.ipc.open_stream(stream)
+                            names += f.schema.names
+                            for b in f:
+                                data += b.columns
+                        except pa.lib.ArrowInvalid:
+                            break
+                    df = pa.Table.from_arrays(data, names)
                 else:
                     raise FunctionFailed(f'{req.status_code} {req.text}')
             else:
+                from_mlkit = False
                 params['i'] = list(self.oid_map)
                 stats = self.client.call('item.state_history', params)
                 data = OrderedDict()
@@ -372,10 +390,14 @@ class HistoryDF:
                         col = proc['value']
                         data[col] = stats.pop(f'{oid}/value')
                 df = pa.Table.from_pydict(data)
-        return _finalize_data(df, t_col=t_col, output=output, tz=tz)
+        return _finalize_data(df,
+                              t_col=t_col,
+                              output=output,
+                              tz=tz,
+                              from_mlkit=from_mlkit)
 
 
-def _finalize_data(df, t_col=None, output=None, tz=None):
+def _finalize_data(df, t_col=None, output=None, tz=None, from_mlkit=False):
     if output == 'arrow':
         return df
     if tz == 'local':
@@ -384,14 +406,16 @@ def _finalize_data(df, t_col=None, output=None, tz=None):
         import pandas as pd
         df = df.to_pandas()
         if t_col != 'drop' and tz is not None:
-            df['time'] = pd.to_datetime(df['time'], unit='s')
+            if not from_mlkit:
+                df['time'] = pd.to_datetime(df['time'], unit='s')
             df['time'] = df['time'].dt.tz_localize('UTC').dt.tz_convert(tz)
         return df
     elif output == 'polars':
         import polars as pl
         df = pl.from_arrow(df)
         if t_col != 'drop' and tz is not None:
-            df = df.with_column(pl.from_epoch('time', unit='s'))
+            if not from_mlkit:
+                df = df.with_column(pl.from_epoch('time', unit='s'))
             df = df.with_columns(df['time'].dt.replace_time_zone('UTC'))
             df = df.with_columns(df['time'].dt.convert_time_zone(tz))
         return df
