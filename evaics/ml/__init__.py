@@ -13,13 +13,17 @@ import pyarrow.compute as pc
 
 from datetime import datetime
 from typing import Union
-from io import StringIO, BytesIO
+from io import BytesIO
 
 from evaics.client import HttpClient
 from evaics.sdk import OID, FunctionFailed, pack, unpack
 from collections import OrderedDict
 
 from busrt.rpc import Rpc as BusRpcClient
+
+MIME_CVS = 'text/csv'
+MIME_ARROW_STREAM = 'application/vnd.apache.arrow.stream'
+MIME_ARROW_FILE = 'application/vnd.apache.arrow.file'
 
 
 class HistoryDF:
@@ -260,12 +264,19 @@ class HistoryDF:
             params = {'database': database, 'oid_map': self.oid_map}
             files = {}
             if isinstance(data, str):
-                files['file'] = ('', open(data, 'r'), 'text/csv')
+                if data.endswith('.arrows'):
+                    mime = MIME_ARROW_STREAM
+                elif data.endswith('.arrow'):
+                    mime = MIME_ARROW_FILE
+                else:
+                    mime = MIME_CVS
+                files['file'] = ('', open(data, 'rb'), mime)
             elif isinstance(data, pa.Table):
-                buf = StringIO()
-                csv.write_csv(data, buf)
+                buf = BytesIO()
+                with pa.ipc.new_stream(buf, data.schema) as writer:
+                    writer.write(data)
                 buf.seek(0)
-                files['file'] = ('', buf, 'text/csv')
+                files['file'] = ('', buf, MIME_ARROW_STREAM)
             else:
                 raise ValueError('unsupported data kind')
             req = self._post(f'{ml_url}/ml/api/upload.item.state_history',
@@ -319,7 +330,7 @@ class HistoryDF:
         params = self._prepare_mlkit_params(t_col)
         req = self._post(f'{ml_url}/ml/api/query.item.state_history',
                          headers={
-                             'accept': 'application/vnd.apache.arrow.stream',
+                             'accept': MIME_ARROW_STREAM,
                              'accept-encoding': 'gzip'
                          },
                          json=params,
