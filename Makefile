@@ -9,6 +9,7 @@ ver:
 d: build
 
 build:
+	rm -f evaics/client evaics/exceptions.py evaics/sdk
 	rm -rf dist build evaics.egg-info
 	python3 setup.py sdist
 
