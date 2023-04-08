@@ -38,16 +38,13 @@ class HistoryDF:
         """
         Create HistoryDF object instance
 
+        All configuration methods of the class can be used in chains.
+
         Args:
             client: HTTP client object
 
         Optional:
             params_csv: CSV file or stream to read parameters from
-
-        All configuration methods of the class can be used in chains, e.g.
-        HistoryDF(client).oid(
-            'sensor:s1', status=False, value='s1').oid(
-            'sensor:s2', status=False, value='s2').fill('1T').fetch()
         """
         self.client = client
         self.mlkit = None
@@ -390,9 +387,9 @@ class HistoryDF:
         Optional:
             output: output format (arrow, pandas or polars)
             t_col: time column processing, "keep" - keep the column, "drop" -
-                drop the time column
+            drop the time column
             tz: time zone (local, custom or None to keep time column as UNIX
-                timestamp), the default is "local"
+            timestamp), the default is "local"
             strict_col_order: force strict column ordering
 
 
