@@ -3,3 +3,6 @@ __pycache__
 build
 dist
 evaics.ml.egg-info
+evaics/client
+evaics/sdk
+evaics/exceptions.py
