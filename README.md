@@ -2,8 +2,6 @@
 
 Python client for EVA ICS Machine Learning Kit
 
-## Installation
+## Documentation
 
-```shell
-pip3 install evaics.ml
-```
+<https://info.bma.ai/en/actual/eva-mlkit/client/py/>
