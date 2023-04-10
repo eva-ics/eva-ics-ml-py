@@ -426,7 +426,7 @@ def _finalize_data(df, t_col=None, output=None, tz=None, from_ipc=False):
     if output == 'pandas':
         import pandas as pd
         df = df.to_pandas()
-        if t_col != 'drop' and tz is not None:
+        if len(df) > 0 and t_col != 'drop' and tz is not None:
             if not from_ipc:
                 df['time'] = pd.to_datetime(df['time'], unit='s')
             df['time'] = df['time'].dt.tz_localize('UTC').dt.tz_convert(tz)
@@ -434,7 +434,7 @@ def _finalize_data(df, t_col=None, output=None, tz=None, from_ipc=False):
     elif output == 'polars':
         import polars as pl
         df = pl.from_arrow(df)
-        if t_col != 'drop' and tz is not None:
+        if len(df) > 0 and t_col != 'drop' and tz is not None:
             if not from_ipc:
                 df = df.with_column(pl.from_epoch('time', unit='s'))
             df = df.with_columns(df['time'].dt.replace_time_zone('UTC'))
