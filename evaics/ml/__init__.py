@@ -380,7 +380,7 @@ class HistoryDF:
               t_col: str = 'keep',
               tz: str = 'local',
               output='arrow',
-              strict_col_order=False):
+              strict_col_order=True):
         """
         Fetch data
 
@@ -390,7 +390,7 @@ class HistoryDF:
             drop the time column
             tz: time zone (local, custom or None to keep time column as UNIX
             timestamp), the default is "local"
-            strict_col_order: force strict column ordering
+            strict_col_order: force strict column ordering (default: True)
 
 
         Returns:
