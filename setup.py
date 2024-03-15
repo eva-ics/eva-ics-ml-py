@@ -1,4 +1,4 @@
-__version__ = '0.1.5'
+__version__ = '0.1.6'
 
 import setuptools
 
@@ -13,7 +13,7 @@ setuptools.setup(
     description='EVA ICS v4 Machine Learning Kit',
     long_description=long_description,
     long_description_content_type='text/markdown',
-    url='https://github.com/eva-ics/eva-mlkit-client-python',
+    url='https://github.com/eva-ics/eva-ics-ml-py',
     packages=setuptools.find_packages(),
     license='Apache License 2.0',
     install_requires=[
