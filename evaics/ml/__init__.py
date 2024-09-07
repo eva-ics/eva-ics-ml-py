@@ -249,7 +249,7 @@ class HistoryDF:
         Requires ML kit server
 
         Options:
-            data: Pandas data frame, file object or file path
+            data: Pyarrow table, file object or file path
             database: database svc id (default: default)
         """
         if isinstance(self.client, BusRpcClient):
